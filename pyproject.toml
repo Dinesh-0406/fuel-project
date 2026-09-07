@@ -1,0 +1,33 @@
+[project]
+name = "fuel-route-optimizer"
+version = "1.0.0"
+description = "Route planning API with cost-optimal fuel stop selection"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "migrations", "staticfiles"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"routes/tests/*" = ["B008"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = "migrations|\\.venv"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+testpaths = ["routes/tests"]
+filterwarnings = ["error::DeprecationWarning:routes.*"]
+
+[tool.coverage.run]
+source = ["routes"]
+omit = ["*/migrations/*", "*/tests/*"]

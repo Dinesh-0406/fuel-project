@@ -1,0 +1,27 @@
+# Optional convenience stack. The project runs perfectly well without Docker --
+# see the README for the plain virtualenv route.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DJANGO_DEBUG: "False"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-change-me-in-production}"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      REDIS_URL: "redis://redis:6379/0"
+      GEOCODER_USER_AGENT: "${GEOCODER_USER_AGENT:-fuel-route-optimizer/1.0 (set-a-real-contact)}"
+    volumes:
+      # Keeps the SQLite database and downloaded Gazetteer files across restarts.
+      - ./data:/app/data
+      - sqlite-data:/app/db
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  sqlite-data:
