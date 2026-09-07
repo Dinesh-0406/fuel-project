@@ -159,11 +159,15 @@ class FuelPlanOptimizer:
         self.max_range_miles = float(max_range_miles)
         self.mpg = float(mpg)
         self.tank_capacity_gallons = self.max_range_miles / self.mpg
+        # The reserve is a safety margin against imprecise station positions: no
+        # leg is planned longer than the reduced range, and every purchase is
+        # sized so the vehicle still arrives holding the reserve.
         self.reserve_gallons = max(0.0, float(reserve_gallons))
-        # Usable range after holding back the safety reserve.
-        self.usable_range_miles = max(
-            0.0, (self.tank_capacity_gallons - self.reserve_gallons) * self.mpg
-        )
+        self.usable_range_miles = self.range_from(self.tank_capacity_gallons)
+
+    def range_from(self, gallons: float) -> float:
+        """Miles drivable on ``gallons`` while still keeping the reserve intact."""
+        return max(0.0, gallons - self.reserve_gallons) * self.mpg
 
     # -- public API ---------------------------------------------------------
 
@@ -250,7 +254,7 @@ class FuelPlanOptimizer:
         not covered, no strategy can succeed and the greedy would be chasing an
         impossible plan.
         """
-        reachable = start_fuel * self.mpg
+        reachable = self.range_from(start_fuel)
         if destination <= reachable + EPSILON_MILES:
             return
 
@@ -281,7 +285,7 @@ class FuelPlanOptimizer:
     def _greedy(
         self, stations: Sequence[CandidateStation], destination: float, start_fuel: float
     ) -> list[FuelStop]:
-        if not stations or destination <= start_fuel * self.mpg + EPSILON_MILES:
+        if not stations or destination <= self.range_from(start_fuel) + EPSILON_MILES:
             return []
 
         positions = [s.distance_along_route_miles for s in stations]
@@ -309,11 +313,10 @@ class FuelPlanOptimizer:
 
         # First move: we cannot buy at the start, so drive to the cheapest
         # station within the range of the fuel already in the tank.
-        furthest = last_within(position, fuel * self.mpg)
-        first_candidate = 0
-        if furthest < first_candidate:
+        furthest = last_within(position, self.range_from(fuel))
+        if furthest < 0:
             raise InfeasiblePlan("No fuel station is reachable from the start location.")
-        index = range_index.query(first_candidate, furthest)
+        index = range_index.query(0, furthest)
 
         while True:
             station = stations[index]
@@ -359,8 +362,12 @@ class FuelPlanOptimizer:
                 next_index = range_index.query(index + 1, furthest)
                 target_miles = math.inf  # fill completely
 
+            # Buy enough to cover the leg AND still arrive holding the reserve.
+            # With the default reserve of 0 this is simply the fuel for the leg.
             needed_gallons = (
-                self.tank_capacity_gallons if math.isinf(target_miles) else target_miles / self.mpg
+                self.tank_capacity_gallons
+                if math.isinf(target_miles)
+                else target_miles / self.mpg + self.reserve_gallons
             )
             purchase = min(
                 max(0.0, needed_gallons - fuel_before),
@@ -369,7 +376,10 @@ class FuelPlanOptimizer:
             fuel_after = fuel_before + purchase
 
             if purchase > 0.0:
-                cost = (Decimal(repr(purchase)) * station.price).quantize(
+                # Gallons are a physical quantity (float); money is not. Convert
+                # via str() so the Decimal is the shortest value that round-trips
+                # the float, rather than its full binary expansion.
+                cost = (Decimal(str(purchase)) * station.price).quantize(
                     CENTS, rounding=ROUND_HALF_UP
                 )
                 stops.append(

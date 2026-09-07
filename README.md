@@ -603,7 +603,7 @@ prices are written to stderr with their row number.
 ## 16. Testing
 
 ```bash
-pytest                                    # 160 tests
+pytest                                    # 167 tests
 pytest --cov=routes --cov-report=term-missing
 ```
 
@@ -620,7 +620,8 @@ a live service.
 | `test_enrichment.py` | Suffix stripping (`"Bay City city"` → `"Bay City"`), abbreviation matching, tier fallback, state scoping, resumability, failure logging. |
 | `test_api.py` | Request validation, response shape, GeoJSON validity, money serialisation, error codes for every failure mode, **call-budget assertions**, cache behaviour, no-traceback-leak. |
 
-Coverage is ~94–100% across the business-logic modules.
+Coverage is 87% overall and 94–100% across the business-logic modules (the gap is
+the benchmark command, which is a developer tool rather than request-path code).
 
 Two tests are worth singling out:
 
@@ -739,7 +740,7 @@ Stated honestly, because they are the difference between a demo and a production
 │   │   ├── enrich_fuel_stations.py
 │   │   └── benchmark_routes.py
 │   ├── templates/routes/map.html   Leaflet demo
-│   └── tests/                   160 tests, fully offline
+│   └── tests/                   167 tests, fully offline
 ├── data/
 │   ├── fuel-prices-for-be-assessment.csv
 │   └── README.md

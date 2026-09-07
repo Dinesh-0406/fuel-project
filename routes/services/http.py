@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Collection
 from typing import Any
 
 import requests
@@ -31,6 +32,7 @@ def get_json(
     max_retries: int = 2,
     backoff_seconds: float = 0.5,
     provider: str = "provider",
+    payload_statuses: Collection[int] = (),
 ) -> dict | list:
     """GET a JSON document with bounded retries.
 
@@ -39,6 +41,11 @@ def get_json(
 
     Only GETs are retried -- they are idempotent, so a repeat is always safe.
     Retries are capped and use linear backoff, so there is no unbounded loop.
+
+    ``payload_statuses`` lists error statuses whose BODY is still meaningful and
+    should be returned rather than raised on. OSRM, for example, reports an
+    impossible route as HTTP 400 with ``{"code": "NoRoute"}`` -- a real routing
+    outcome for the caller to interpret, not a provider failure.
     """
     last_error: str = "unknown error"
     attempts = max(1, max_retries + 1)
@@ -60,7 +67,14 @@ def get_json(
                     attempts,
                 )
             elif not response.ok:
-                # 4xx other than 429 will not improve on retry.
+                if response.status_code in payload_statuses:
+                    try:
+                        return response.json()
+                    except ValueError as exc:
+                        raise ProviderHTTPError(
+                            f"{provider} returned a malformed JSON response"
+                        ) from exc
+                # Other 4xx will not improve on retry.
                 raise ProviderHTTPError(f"{provider} returned HTTP {response.status_code}")
             else:
                 logger.info("%s responded in %.0fms", provider, elapsed_ms)

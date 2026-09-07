@@ -363,3 +363,35 @@ def test_greedy_matches_exhaustive_optimum(optimizer, seed):
         )
 
     assert compared > 20, "too few feasible instances to be meaningful"
+
+
+# ---------------------------------------------------------------------------
+# Safety reserve
+# ---------------------------------------------------------------------------
+
+
+def test_reserve_gallons_are_still_in_the_tank_on_arrival():
+    """With a reserve configured, the vehicle never plans to arrive empty."""
+    reserved = FuelPlanOptimizer(MAX_RANGE, MPG, reserve_gallons=5.0)
+    plan = reserved.plan([make_candidate(400, "3.00")], 750.0)
+
+    stop = plan.stops[-1]
+    # 350 miles remain -> 35 gal, plus the 5 gal reserve, less the 10 in the tank.
+    assert stop.fuel_purchased_gallons == pytest.approx(30.0, abs=1e-6)
+    assert plan.fuel_remaining_at_destination_gallons == pytest.approx(5.0, abs=1e-6)
+
+
+def test_reserve_shortens_the_usable_range():
+    """A 5-gallon reserve cuts the planning range from 500 to 450 miles."""
+    reserved = FuelPlanOptimizer(MAX_RANGE, MPG, reserve_gallons=5.0)
+    assert reserved.usable_range_miles == pytest.approx(450.0)
+
+    # A 460-mile gap is fine for the full tank but not once 5 gal are held back.
+    FuelPlanOptimizer(MAX_RANGE, MPG).plan([make_candidate(460, "3.00")], 800.0)
+    with pytest.raises(InfeasiblePlan):
+        reserved.plan([make_candidate(460, "3.00")], 800.0)
+
+
+def test_zero_reserve_is_the_default_and_changes_nothing(optimizer):
+    assert optimizer.reserve_gallons == 0.0
+    assert optimizer.usable_range_miles == pytest.approx(MAX_RANGE)

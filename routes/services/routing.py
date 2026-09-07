@@ -92,6 +92,9 @@ class OSRMProvider(RoutingProvider):
                 max_retries=self.max_retries,
                 provider=self.name,
                 headers={"User-Agent": settings.GEOCODER_USER_AGENT},
+                # OSRM signals an impossible route with HTTP 400 and a JSON body
+                # carrying code "NoRoute"; that is a routing answer, not an outage.
+                payload_statuses={400},
             )
         except ProviderHTTPError as exc:
             raise ProviderUnavailable(str(exc)) from exc

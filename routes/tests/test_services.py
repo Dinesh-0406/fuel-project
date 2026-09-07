@@ -338,3 +338,53 @@ def test_cached_route_survives_a_cold_provider():
     with mock.patch("routes.services.http.requests.get", side_effect=requests.Timeout()):
         result = router.route((40.7128, -74.006), (41.8781, -87.6298))
     assert result.distance_miles == pytest.approx(790.5, abs=0.1)
+
+
+def test_osrm_http_400_no_route_is_a_routing_outcome_not_an_outage():
+    """OSRM reports an impossible route as HTTP 400 with code "NoRoute".
+
+    Honolulu -> Denver really does this. It must surface as 422 NO_ROUTE_FOUND,
+    not as a 502 blaming the provider.
+    """
+    body = {"message": "Impossible route between points", "code": "NoRoute"}
+    with (
+        mock.patch(
+            "routes.services.http.requests.get", return_value=fake_response(body, status_code=400)
+        ),
+        pytest.raises(NoRouteFound),
+    ):
+        OSRMProvider().route((21.3069, -157.8583), (39.7392, -104.9903))
+
+
+def test_osrm_http_400_is_not_retried():
+    body = {"code": "NoRoute"}
+    with (
+        mock.patch(
+            "routes.services.http.requests.get", return_value=fake_response(body, status_code=400)
+        ) as get,
+        pytest.raises(NoRouteFound),
+    ):
+        OSRMProvider(max_retries=3).route((21.3069, -157.8583), (39.7392, -104.9903))
+    assert get.call_count == 1
+
+
+def test_get_json_still_raises_on_unexpected_client_errors():
+    """Only statuses the caller opts into are treated as payloads."""
+    with (
+        mock.patch(
+            "routes.services.http.requests.get", return_value=fake_response({}, status_code=404)
+        ),
+        pytest.raises(ProviderHTTPError),
+    ):
+        get_json("https://example.test", payload_statuses={400})
+
+
+def test_geocoder_client_errors_are_not_swallowed():
+    """Nominatim's 403 for a placeholder User-Agent must stay a provider error."""
+    with (
+        mock.patch(
+            "routes.services.http.requests.get", return_value=fake_response({}, status_code=403)
+        ),
+        pytest.raises(ProviderUnavailable),
+    ):
+        NominatimProvider().geocode("New York, NY")
