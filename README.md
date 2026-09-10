@@ -291,15 +291,53 @@ curl -X POST http://127.0.0.1:8000/api/v1/routes/ \
   -d '{"start": "New York, NY", "finish": "Los Angeles, CA"}'
 ```
 
-### Response (abridged — a real one has ~34,500 geometry points)
+### Response (abridged — a real one has ~32,500 geometry points)
+
+The four numbers a reviewer wants first — distance, duration, stop count, cost — are
+surfaced in a `summary` block at the very top of the payload, ahead of the detailed
+`fuel_plan`, the raw route geometry, and the request diagnostics in `meta`. Within each
+stop, the fields worth glancing at (`sequence`, `station`, `cost`, `distance_from_start_miles`)
+come before the supporting fuel arithmetic and detour distance.
 
 ```json
 {
+  "summary": {
+    "distance_miles": 2779.61,
+    "duration_minutes": 3000.0,
+    "stop_count": 9,
+    "total_cost": "680.25"
+  },
+  "fuel_plan": {
+    "stop_count": 9,
+    "total_cost": "680.25",
+    "stops": [
+      {
+        "sequence": 1,
+        "station": {
+          "id": 1234, "name": "TRAVEL CENTER", "city": "Youngstown", "state": "OH",
+          "address": "I-80, EXIT 234", "opis_truckstop_id": "4321",
+          "latitude": 41.0997, "longitude": -80.6495
+        },
+        "cost": "17.26",
+        "price_per_gallon": "3.059",
+        "distance_from_start_miles": 390.79,
+        "fuel_purchased_gallons": 5.643,
+        "fuel_before_purchase_gallons": 10.921,
+        "fuel_after_purchase_gallons": 16.564,
+        "distance_from_previous_stop_miles": 390.79,
+        "distance_to_destination_miles": 2388.82,
+        "detour_from_route_miles": 3.78
+      }
+    ],
+    "total_gallons_purchased": 227.961,
+    "total_fuel_consumed_gallons": 277.961,
+    "fuel_remaining_at_destination_gallons": 0.0
+  },
   "start":  { "input": "New York, NY", "latitude": 40.7127281, "longitude": -74.0060152 },
   "finish": { "input": "Los Angeles, CA", "latitude": 34.0536909, "longitude": -118.242766 },
   "route": {
-    "distance_miles": 2794.03,
-    "duration_minutes": 2987.7,
+    "distance_miles": 2779.61,
+    "duration_minutes": 3000.0,
     "geometry": { "type": "LineString", "coordinates": [[-74.006, 40.712], ...] }
   },
   "vehicle": {
@@ -308,50 +346,26 @@ curl -X POST http://127.0.0.1:8000/api/v1/routes/ \
     "tank_capacity_gallons": 50.0,
     "starting_fuel_gallons": 50.0
   },
-  "fuel_plan": {
-    "stop_count": 15,
-    "total_gallons_purchased": 229.403,
-    "total_fuel_consumed_gallons": 279.403,
-    "fuel_remaining_at_destination_gallons": 0.0,
-    "total_cost": "694.02",
-    "stops": [
-      {
-        "sequence": 1,
-        "station": {
-          "id": 1234, "opis_truckstop_id": "4321",
-          "name": "TRAVEL CENTER", "address": "I-80, EXIT 234",
-          "city": "Youngstown", "state": "OH",
-          "latitude": 41.0997, "longitude": -80.6495
-        },
-        "price_per_gallon": "3.059",
-        "distance_from_start_miles": 390.79,
-        "distance_from_previous_stop_miles": 390.79,
-        "distance_to_destination_miles": 2403.24,
-        "detour_from_route_miles": 3.78,
-        "fuel_before_purchase_gallons": 10.921,
-        "fuel_purchased_gallons": 5.643,
-        "fuel_after_purchase_gallons": 16.564,
-        "cost": "17.26"
-      }
-    ]
-  },
   "meta": {
     "routing_provider": "OSRM",
     "geocoding_provider": "Nominatim",
     "route_corridor_miles": 10.0,
-    "fuel_station_count_considered": 460,
-    "fuel_stations_in_bounding_box": 3406,
-    "route_geometry_points": 34513,
+    "fuel_station_count_considered": 409,
+    "fuel_stations_in_bounding_box": 2764,
+    "route_geometry_points": 32537,
+    "routes_considered": 2,
     "external_calls": { "geocoding": 2, "routing": 1 },
     "route_cache_hit": false,
     "plan_cache_hit": false,
-    "timing_ms": { "total": 1573.1, "routing_provider": 1521.6, "local": 51.5 }
+    "timing_ms": { "total": 2356.4, "routing_provider": 2158.5, "local": 197.9 }
   }
 }
 ```
 
 `meta.external_calls` is deliberately part of the contract: it is how you verify from the
-outside that the service is not calling the routing API per station.
+outside that the service is not calling the routing API per station. `meta.routes_considered`
+shows how many road alternatives OSRM returned in that single call — each is costed against
+fuel prices locally, and the cheapest wins (see [section 10](#10-fuel-optimization-explained)).
 
 ### Money and units
 

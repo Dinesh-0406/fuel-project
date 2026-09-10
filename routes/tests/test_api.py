@@ -145,13 +145,27 @@ def test_successful_plan_has_the_documented_shape(client, stations_along_route, 
     assert response.status_code == 200
     body = response.json()
 
-    assert set(body) == {"start", "finish", "route", "vehicle", "fuel_plan", "meta"}
+    assert set(body) == {"summary", "start", "finish", "route", "vehicle", "fuel_plan", "meta"}
+    # The four headline numbers must be the first key a client sees, and must
+    # agree with the detailed blocks lower down.
+    assert list(body.keys())[0] == "summary"
+    assert body["summary"] == {
+        "distance_miles": body["route"]["distance_miles"],
+        "duration_minutes": body["route"]["duration_minutes"],
+        "stop_count": body["fuel_plan"]["stop_count"],
+        "total_cost": body["fuel_plan"]["total_cost"],
+    }
+
     assert body["start"]["latitude"] == 35.0
     assert body["finish"]["longitude"] == -90.0
 
     assert body["route"]["distance_miles"] == pytest.approx(700.0, abs=0.5)
     assert body["route"]["geometry"]["type"] == "LineString"
     assert len(body["route"]["geometry"]["coordinates"]) == len(ROUTE_COORDINATES)
+    # Geometry is the largest field in the payload -- it belongs last within
+    # "route", not first, so a reader hits distance/duration before the dump
+    # of coordinates.
+    assert list(body["route"].keys())[-1] == "geometry"
 
     assert body["vehicle"] == {
         "max_range_miles": 500.0,
@@ -159,6 +173,33 @@ def test_successful_plan_has_the_documented_shape(client, stations_along_route, 
         "tank_capacity_gallons": 50.0,
         "starting_fuel_gallons": 50.0,
     }
+
+
+def test_stop_headline_fields_come_before_supporting_detail(
+    client, stations_along_route, patched_providers
+):
+    """Sequence, station, cost and distance are the fields worth glancing at
+    first; the fuel arithmetic and detour distance are supporting detail and
+    belong after them."""
+    body = client.post(URL, {"start": "Memphis, TN", "finish": "Duluth, MN"}, format="json").json()
+    stop = body["fuel_plan"]["stops"][0]
+    keys = list(stop.keys())
+
+    for headline in (
+        "sequence",
+        "station",
+        "cost",
+        "price_per_gallon",
+        "distance_from_start_miles",
+    ):
+        assert headline in keys
+    for detail in (
+        "fuel_before_purchase_gallons",
+        "fuel_after_purchase_gallons",
+        "detour_from_route_miles",
+    ):
+        assert detail in keys
+        assert keys.index(detail) > keys.index("cost")
 
 
 def test_route_geometry_is_map_ready_geojson(client, stations_along_route, patched_providers):
@@ -390,3 +431,98 @@ def test_errors_never_leak_a_traceback(client, stations_along_route):
     assert body["error"]["code"] == "INTERNAL_ERROR"
     assert "secret" not in str(body)
     assert "Traceback" not in str(body)
+
+
+# ---------------------------------------------------------------------------
+# Choosing between the alternatives OSRM returns
+# ---------------------------------------------------------------------------
+
+
+def bowed_route(points=200):
+    """Same endpoints as the meridian route, but bowing ~80 miles west."""
+    return straight_line((35.0, -90.0), (40.0, -91.5), points=points // 2) + straight_line(
+        (40.0, -91.5), (45.0, -90.0), points=points // 2
+    )
+
+
+def fake_get_two_routes(url, params=None, headers=None, timeout=None):
+    """Like ``fake_get``, but OSRM offers an alternative alongside the direct road."""
+    response = mock.Mock(status_code=200, ok=True)
+    if "/search" in url:
+        query = (params or {}).get("q", "")
+        coordinates = GEOCODES.get(query)
+        response.json.return_value = (
+            [{"lat": str(coordinates[0]), "lon": str(coordinates[1]), "display_name": query}]
+            if coordinates
+            else []
+        )
+    else:
+        response.json.return_value = two_route_payload()
+    return response
+
+
+def two_route_payload():
+    """OSRM's response when it offers an alternative: both arrive in one call."""
+    direct = ROUTE_DISTANCE_METERS
+    bowed = direct * 1.05  # the detour west is genuinely longer
+    return {
+        "code": "Ok",
+        "routes": [
+            {
+                "distance": direct,
+                "duration": direct / 26.8,
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [list(c) for c in ROUTE_COORDINATES],
+                },
+            },
+            {
+                "distance": bowed,
+                "duration": bowed / 26.8,
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [list(c) for c in bowed_route()],
+                },
+            },
+        ],
+    }
+
+
+@pytest.fixture
+def stations_on_both_routes(make_station):
+    """Dear fuel down the direct road, cheap fuel along the longer one."""
+    for latitude in (37.0, 39.0, 41.0, 43.0):
+        make_station(latitude=latitude, longitude=-90.0, retail_price=Decimal("5.000000"))
+    # The bow runs from -90 at 35N out to -91.5 at 40N and back.
+    for latitude, longitude in ((37.0, -90.6), (39.0, -91.2), (41.0, -91.2), (43.0, -90.6)):
+        make_station(latitude=latitude, longitude=longitude, retail_price=Decimal("3.000000"))
+
+
+def test_the_cheapest_alternative_is_chosen_not_the_shortest(client, stations_on_both_routes):
+    """A longer road wins when its fuel is cheap enough to pay for the extra miles."""
+    with mock.patch("routes.services.http.requests.get", side_effect=fake_get_two_routes):
+        response = client.post(URL, {"start": "Memphis, TN", "finish": "Duluth, MN"}, format="json")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # The longer road was taken, and every stop is on the cheap side of the map.
+    assert body["route"]["distance_miles"] > 700.0
+    assert [s["price_per_gallon"] for s in body["fuel_plan"]["stops"]] == [
+        "3.000" for _ in body["fuel_plan"]["stops"]
+    ]
+    # Costing two roads still spends exactly one routing call.
+    assert body["meta"]["external_calls"]["routing"] == 1
+    assert body["meta"]["routes_considered"] == 2
+
+
+def test_only_feasible_alternative_is_used(client, make_station):
+    """The direct road has no reachable fuel, so the bowed one must be planned."""
+    for latitude, longitude in ((37.0, -90.6), (39.0, -91.2), (41.0, -91.2), (43.0, -90.6)):
+        make_station(latitude=latitude, longitude=longitude, retail_price=Decimal("3.000000"))
+
+    with mock.patch("routes.services.http.requests.get", side_effect=fake_get_two_routes):
+        response = client.post(URL, {"start": "Memphis, TN", "finish": "Duluth, MN"}, format="json")
+
+    assert response.status_code == 200
+    assert response.json()["route"]["distance_miles"] > 700.0

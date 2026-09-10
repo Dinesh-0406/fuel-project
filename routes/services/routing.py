@@ -1,8 +1,10 @@
 """Routing provider abstraction and the OSRM implementation.
 
-Exactly one routing request is issued per uncached route. The returned polyline
-is then used as the sole geometric reference for finding fuel stations -- the
-routing service is never consulted per station.
+Exactly one routing request is issued per uncached journey, and it asks for
+alternatives: OSRM returns them in the same response, so several roads can be
+costed against fuel prices without spending a second call. Each returned
+polyline is then the sole geometric reference for finding stations near it --
+the routing service is never consulted per station.
 """
 
 from __future__ import annotations
@@ -45,6 +47,15 @@ class RoutingProvider(ABC):
     def route(self, start: tuple[float, float], finish: tuple[float, float]) -> RouteResult:
         """Return the driving route between two ``(latitude, longitude)`` points."""
 
+    def routes(self, start: tuple[float, float], finish: tuple[float, float]) -> list[RouteResult]:
+        """Every route worth costing, the provider's preferred one first.
+
+        Fuel prices vary by region, so the shortest road is not always the
+        cheapest one to drive. Providers that can offer alternatives override
+        this; the rest simply offer the single route they have.
+        """
+        return [self.route(start, finish)]
+
 
 class OSRMProvider(RoutingProvider):
     """Routing via an OSRM ``/route/v1/driving`` endpoint.
@@ -77,6 +88,9 @@ class OSRMProvider(RoutingProvider):
         return lat, lon
 
     def route(self, start: tuple[float, float], finish: tuple[float, float]) -> RouteResult:
+        return self.routes(start, finish)[0]
+
+    def routes(self, start: tuple[float, float], finish: tuple[float, float]) -> list[RouteResult]:
         start_lat, start_lon = self._validate(start, "start")
         finish_lat, finish_lon = self._validate(finish, "finish")
 
@@ -87,7 +101,14 @@ class OSRMProvider(RoutingProvider):
         try:
             payload = get_json(
                 url,
-                params={"overview": "full", "geometries": "geojson", "steps": "false"},
+                # Alternatives ride along in the same response, so costing several
+                # roads still takes exactly one request.
+                params={
+                    "overview": "full",
+                    "geometries": "geojson",
+                    "steps": "false",
+                    "alternatives": "true",
+                },
                 timeout=self.timeout,
                 max_retries=self.max_retries,
                 provider=self.name,
@@ -101,7 +122,7 @@ class OSRMProvider(RoutingProvider):
 
         return self._parse(payload)
 
-    def _parse(self, payload: dict) -> RouteResult:
+    def _parse(self, payload: dict) -> list[RouteResult]:
         if not isinstance(payload, dict):
             raise ProviderUnavailable("OSRM returned an unexpected response body.")
 
@@ -115,7 +136,15 @@ class OSRMProvider(RoutingProvider):
         if not routes:
             raise NoRouteFound("No drivable route exists between the supplied locations.")
 
-        route = routes[0]
+        parsed = [self._parse_route(route) for route in routes]
+        logger.info(
+            "Route resolved: %d option(s), %s",
+            len(parsed),
+            ", ".join(f"{r.distance_miles:.1f} mi" for r in parsed),
+        )
+        return parsed
+
+    def _parse_route(self, route: dict) -> RouteResult:
         geometry = route.get("geometry") or {}
         coordinates = geometry.get("coordinates") or []
         if geometry.get("type") != "LineString" or len(coordinates) < 2:
@@ -131,19 +160,12 @@ class OSRMProvider(RoutingProvider):
         if distance_meters <= 0:
             raise NoRouteFound("The routing provider returned a zero-length route.")
 
-        result = RouteResult(
+        return RouteResult(
             distance_miles=meters_to_miles(distance_meters),
             duration_minutes=duration_seconds / 60.0,
             coordinates=parsed,
             provider=self.name,
         )
-        logger.info(
-            "Route resolved: %.1f miles, %.0f minutes, %d vertices",
-            result.distance_miles,
-            result.duration_minutes,
-            result.vertex_count,
-        )
-        return result
 
 
 class CachedRoutingProvider(RoutingProvider):
@@ -156,26 +178,32 @@ class CachedRoutingProvider(RoutingProvider):
         self.last_call_was_cached: bool | None = None
 
     def route(self, start: tuple[float, float], finish: tuple[float, float]) -> RouteResult:
+        return self.routes(start, finish)[0]
+
+    def routes(self, start: tuple[float, float], finish: tuple[float, float]) -> list[RouteResult]:
         key = route_cache_key(start, finish, self._provider.name)
         cached = cache.get(key)
         if cached is not None:
             self.last_call_was_cached = True
             logger.info("Route cache hit (%s)", key)
-            return RouteResult(**cached)
+            return [RouteResult(**entry) for entry in cached]
 
         self.last_call_was_cached = False
-        result = self._provider.route(start, finish)
+        results = self._provider.routes(start, finish)
         cache.set(
             key,
-            {
-                "distance_miles": result.distance_miles,
-                "duration_minutes": result.duration_minutes,
-                "coordinates": result.coordinates,
-                "provider": result.provider,
-            },
+            [
+                {
+                    "distance_miles": result.distance_miles,
+                    "duration_minutes": result.duration_minutes,
+                    "coordinates": result.coordinates,
+                    "provider": result.provider,
+                }
+                for result in results
+            ],
             self.ttl,
         )
-        return result
+        return results
 
 
 def get_routing_provider() -> CachedRoutingProvider:

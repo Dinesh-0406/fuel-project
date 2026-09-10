@@ -25,7 +25,7 @@ from routes.services.fuel_optimizer import FuelPlan, FuelPlanOptimizer, Infeasib
 from routes.services.geocoding import CachedGeocoder, GeocodedLocation, get_geocoding_provider
 from routes.services.geometry import RouteGeometry
 from routes.services.routing import CachedRoutingProvider, RouteResult, get_routing_provider
-from routes.services.station_finder import StationFinder
+from routes.services.station_finder import StationFinder, StationSearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class PlanMetrics:
     stations_in_bounding_box: int = 0
     stations_considered: int = 0
     route_vertices: int = 0
+    routes_considered: int = 1  # alternatives costed, all from one call
     elapsed_ms: float = 0.0  # whole request, including any external calls
     routing_ms: float = 0.0  # time spent waiting on the routing provider
     local_ms: float = 0.0  # geometry + station search + optimisation
@@ -103,31 +104,46 @@ class RoutePlanner:
         metrics = PlanMetrics(geocoding_calls=geocoding_calls)
         start_query, finish_query = start.query, finish.query
 
-        # One routing call per uncached origin/destination pair.
+        # One routing call per uncached origin/destination pair, which may carry
+        # several alternatives back with it.
         routing_started = time.perf_counter()
-        route = self.router.route(start.as_tuple, finish.as_tuple)
+        options = self.router.routes(start.as_tuple, finish.as_tuple)
         metrics.routing_ms = (time.perf_counter() - routing_started) * 1000.0
         metrics.route_cache_hit = bool(self.router.last_call_was_cached)
         metrics.routing_calls = 0 if metrics.route_cache_hit else 1
-        metrics.route_vertices = route.vertex_count
+        metrics.routes_considered = len(options)
 
-        # Prepare the geometry once, then find corridor stations locally.
-        geometry = RouteGeometry(
-            route.coordinates,
-            route.distance_miles,
-            resample_miles=settings.ROUTE_RESAMPLE_MILES,
-            grid_cell_miles=max(25.0, self.station_finder.corridor_miles * 2.0),
-        )
-        search = self.station_finder.find(geometry)
-        metrics.stations_in_bounding_box = search.stations_in_bounding_box
-        metrics.stations_considered = len(search.candidates)
+        # The shortest road is not always the cheapest to drive: fuel prices vary
+        # by region, so every option the provider returned is costed in full and
+        # the cheapest wins. This is local work -- no extra provider calls.
+        best: tuple[FuelPlan, RouteResult, RouteGeometry, StationSearchResult] | None = None
+        failure: InfeasiblePlan | None = None
 
-        # Optimise fuel purchases over those candidates.
-        try:
-            fuel_plan = self.optimizer.plan(search.candidates, route.distance_miles)
-        except InfeasiblePlan as exc:
+        for option in options:
+            geometry = RouteGeometry(
+                option.coordinates,
+                option.distance_miles,
+                resample_miles=settings.ROUTE_RESAMPLE_MILES,
+                grid_cell_miles=max(25.0, self.station_finder.corridor_miles * 2.0),
+            )
+            search = self.station_finder.find(geometry)
+            try:
+                candidate_plan = self.optimizer.plan(search.candidates, option.distance_miles)
+            except InfeasiblePlan as exc:
+                failure = failure or exc
+                continue
+            if best is None or candidate_plan.total_cost < best[0].total_cost:
+                best = (candidate_plan, option, geometry, search)
+
+        if best is None:
+            exc = failure or InfeasiblePlan("No route could be fuelled to the destination.")
             logger.warning("No feasible fuel plan for %r -> %r: %s", start_query, finish_query, exc)
             raise NoFeasibleFuelPlan(str(exc), details=exc.details) from exc
+
+        fuel_plan, route, geometry, search = best
+        metrics.route_vertices = route.vertex_count
+        metrics.stations_in_bounding_box = search.stations_in_bounding_box
+        metrics.stations_considered = len(search.candidates)
 
         metrics.elapsed_ms = (time.perf_counter() - started) * 1000.0
         metrics.local_ms = metrics.elapsed_ms - metrics.routing_ms

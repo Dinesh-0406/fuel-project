@@ -37,6 +37,12 @@
   .stop dd { margin:0; text-align:right; }
   .err { background:#3b1d22; border:1px solid #6b2b34; border-radius:6px; padding:10px; font-size:13px; }
   .muted { color:var(--muted); font-size:12px; }
+
+  @media (max-width: 720px) {
+    body { flex-direction:column; height:100vh; }
+    #sidebar { width:100%; height:55vh; border-right:0; border-bottom:1px solid var(--line); }
+    #map { flex:1; min-height:0; }
+  }
 </style>
 </head>
 <body>
@@ -64,6 +70,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 let layer = L.layerGroup().addTo(map);
+window.addEventListener('resize', () => map.invalidateSize());
 const out = document.getElementById('out');
 const button = document.getElementById('go');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>

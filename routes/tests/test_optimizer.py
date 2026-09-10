@@ -18,6 +18,7 @@ from functools import cache
 import pytest
 
 from routes.services.fuel_optimizer import (
+    RESOLUTION_MILES,
     CandidateStation,
     FuelPlanOptimizer,
     InfeasiblePlan,
@@ -39,17 +40,29 @@ def plan_for(optimizer, stations, distance, **kwargs):
 
 
 def assert_plan_is_feasible(plan, distance: float, capacity: float = CAPACITY):
-    """Re-simulate the plan and assert the vehicle never runs dry or overfills."""
+    """Re-simulate the plan and assert the vehicle never runs dry or overfills.
+
+    The simulation drives the detour to each station and back, because the plan
+    has to buy fuel for those miles too.
+    """
+    grid = RESOLUTION_MILES / MPG  # the plan rounds each detour up to this
     fuel = plan.starting_fuel_gallons
     position = 0.0
     for stop in plan.stops:
+        detour = stop.station.offset_from_route_miles / MPG
         travelled = stop.distance_from_start_miles - position
-        fuel -= travelled / MPG
+        fuel -= travelled / MPG + detour
         assert fuel >= -1e-6, f"ran out of fuel before mile {stop.distance_from_start_miles}"
-        assert abs(fuel - stop.fuel_before_purchase_gallons) < 1e-6
-        fuel += stop.fuel_purchased_gallons
+
+        # Rounding detours up means the plan may believe it holds slightly less
+        # fuel than it really does. Believing it holds MORE would strand it.
+        assert stop.fuel_before_purchase_gallons <= fuel + 1e-6, "plan over-counts fuel in the tank"
+        assert fuel - stop.fuel_before_purchase_gallons <= grid + 1e-6
+
+        fuel = stop.fuel_before_purchase_gallons + stop.fuel_purchased_gallons
         assert fuel <= capacity + 1e-6, "tank overfilled"
         assert abs(fuel - stop.fuel_after_purchase_gallons) < 1e-6
+        fuel -= detour
         position = stop.distance_from_start_miles
     fuel -= (distance - position) / MPG
     assert fuel >= -1e-6, "ran out of fuel before the destination"
@@ -363,6 +376,60 @@ def test_greedy_matches_exhaustive_optimum(optimizer, seed):
         )
 
     assert compared > 20, "too few feasible instances to be meaningful"
+
+
+# ---------------------------------------------------------------------------
+# Detours that do not pay for themselves
+# ---------------------------------------------------------------------------
+
+
+def test_tank_capped_top_up_is_skipped_when_its_detour_costs_more(optimizer):
+    """Grand Junction -> Minot in miniature.
+
+    The cheapest fuel is at mile 400, but the tank fills there, so a marginally
+    cheaper station two miles on can only absorb the 0.2 gallons burned getting
+    to it. That cent of saving is real, and so is the 4.6-mile round trip needed
+    to collect it -- which costs a hundred times more.
+    """
+    stations = [
+        make_candidate(400, "3.169", station_id=1, offset_miles=0.8),
+        make_candidate(402, "3.186", station_id=2, offset_miles=2.3),
+        make_candidate(610, "3.227", station_id=3, offset_miles=0.2),
+    ]
+    plan = plan_for(optimizer, stations, 986.0)
+
+    assert [s.station.station_id for s in plan.stops] == [1, 3]
+    assert_plan_is_feasible(plan, 986.0)
+
+    # Moving that station onto the route makes it worth using: the same cent of
+    # saving now costs nothing to collect, which is what the detour was buying.
+    on_route = [
+        make_candidate(400, "3.169", station_id=1, offset_miles=0.0),
+        make_candidate(402, "3.186", station_id=2, offset_miles=0.0),
+        make_candidate(610, "3.227", station_id=3, offset_miles=0.0),
+    ]
+    assert [s.station.station_id for s in plan_for(optimizer, on_route, 986.0).stops] == [1, 2, 3]
+
+
+def test_a_detour_that_pays_for_itself_is_kept(optimizer):
+    """The mirror case: 5 miles off-route is fine when the fuel is a dollar cheaper."""
+    stations = [
+        make_candidate(450, "4.00", station_id=1, offset_miles=0.0),
+        make_candidate(460, "3.00", station_id=2, offset_miles=5.0),
+    ]
+    plan = plan_for(optimizer, stations, 900.0)
+
+    assert [s.station.station_id for s in plan.stops] == [2]
+    assert_plan_is_feasible(plan, 900.0)
+
+
+def test_detour_pruning_never_makes_a_route_infeasible(optimizer):
+    """A far-off-route station is kept when it is the only way to finish."""
+    stations = [make_candidate(450, "3.00", station_id=1, offset_miles=9.5)]
+    plan = plan_for(optimizer, stations, 900.0)
+
+    assert [s.station.station_id for s in plan.stops] == [1]
+    assert_plan_is_feasible(plan, 900.0)
 
 
 # ---------------------------------------------------------------------------

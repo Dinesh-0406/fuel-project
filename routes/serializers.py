@@ -83,28 +83,30 @@ class RoutePlanResponseBuilder:
 
         stops = [
             {
+                # Headline fields first -- what a stop cost and where it is.
                 "sequence": stop.sequence,
                 "station": {
                     "id": stop.station.station_id,
-                    "opis_truckstop_id": stop.station.opis_truckstop_id,
                     "name": stop.station.name,
-                    "address": stop.station.address,
                     "city": stop.station.city,
                     "state": stop.station.state,
+                    "address": stop.station.address,
+                    "opis_truckstop_id": stop.station.opis_truckstop_id,
                     "latitude": stop.station.latitude,
                     "longitude": stop.station.longitude,
                 },
+                "cost": _money(stop.cost),
                 "price_per_gallon": str(
                     stop.price_per_gallon.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
                 ),
                 "distance_from_start_miles": _miles(stop.distance_from_start_miles),
+                # Supporting detail below -- fuel arithmetic and route detour.
+                "fuel_purchased_gallons": _gallons(stop.fuel_purchased_gallons),
+                "fuel_before_purchase_gallons": _gallons(stop.fuel_before_purchase_gallons),
+                "fuel_after_purchase_gallons": _gallons(stop.fuel_after_purchase_gallons),
                 "distance_from_previous_stop_miles": _miles(stop.distance_from_previous_stop_miles),
                 "distance_to_destination_miles": _miles(stop.distance_to_destination_miles),
                 "detour_from_route_miles": _miles(stop.station.offset_from_route_miles),
-                "fuel_before_purchase_gallons": _gallons(stop.fuel_before_purchase_gallons),
-                "fuel_purchased_gallons": _gallons(stop.fuel_purchased_gallons),
-                "fuel_after_purchase_gallons": _gallons(stop.fuel_after_purchase_gallons),
-                "cost": _money(stop.cost),
             }
             for stop in fuel.stops
         ]
@@ -120,6 +122,25 @@ class RoutePlanResponseBuilder:
             }
 
         return {
+            # The four numbers a reviewer actually wants first: how far, how
+            # long, how many stops, how much it costs. Everything else below is
+            # supporting detail (geocoding, raw geometry, request diagnostics).
+            "summary": {
+                "distance_miles": _miles(route.distance_miles),
+                "duration_minutes": round(route.duration_minutes, 1),
+                "stop_count": len(stops),
+                "total_cost": _money(fuel.total_cost),
+            },
+            "fuel_plan": {
+                "stop_count": len(stops),
+                "total_cost": _money(fuel.total_cost),
+                "stops": stops,
+                "total_gallons_purchased": _gallons(fuel.total_gallons_purchased),
+                "total_fuel_consumed_gallons": _gallons(fuel.total_fuel_consumed_gallons),
+                "fuel_remaining_at_destination_gallons": _gallons(
+                    fuel.fuel_remaining_at_destination_gallons
+                ),
+            },
             "start": {
                 "input": plan.start.query,
                 "resolved_name": plan.start.display_name,
@@ -141,16 +162,6 @@ class RoutePlanResponseBuilder:
                 ),
                 "starting_fuel_gallons": _gallons(fuel.starting_fuel_gallons),
             },
-            "fuel_plan": {
-                "stop_count": len(stops),
-                "total_gallons_purchased": _gallons(fuel.total_gallons_purchased),
-                "total_fuel_consumed_gallons": _gallons(fuel.total_fuel_consumed_gallons),
-                "fuel_remaining_at_destination_gallons": _gallons(
-                    fuel.fuel_remaining_at_destination_gallons
-                ),
-                "total_cost": _money(fuel.total_cost),
-                "stops": stops,
-            },
             "meta": {
                 "routing_provider": route.provider,
                 "geocoding_provider": "Nominatim",
@@ -158,6 +169,9 @@ class RoutePlanResponseBuilder:
                 "fuel_station_count_considered": plan.metrics.stations_considered,
                 "fuel_stations_in_bounding_box": plan.metrics.stations_in_bounding_box,
                 "route_geometry_points": plan.metrics.route_vertices,
+                # How many roads were costed against fuel prices. They all arrive
+                # in the single routing call counted below.
+                "routes_considered": plan.metrics.routes_considered,
                 "external_calls": {
                     "geocoding": plan.metrics.geocoding_calls,
                     "routing": plan.metrics.routing_calls,

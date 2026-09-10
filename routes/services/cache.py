@@ -52,9 +52,13 @@ def geocode_cache_key(location: str) -> str:
 
 
 def route_cache_key(start: tuple[float, float], finish: tuple[float, float], provider: str) -> str:
-    """Key a route by rounded start/finish coordinates and provider."""
+    """Key a route by rounded start/finish coordinates and provider.
+
+    ``v2`` caches every alternative the provider offered, not just the first, so
+    entries written by ``v1`` are not reusable.
+    """
     p = COORDINATE_PRECISION
-    return "route:v1:" + _digest(
+    return "route:v2:" + _digest(
         provider,
         round(start[0], p),
         round(start[1], p),

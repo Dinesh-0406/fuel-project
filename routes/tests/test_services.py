@@ -126,7 +126,14 @@ def test_osrm_requests_the_documented_parameters():
     params = get.call_args.kwargs["params"]
     # OSRM expects longitude,latitude order.
     assert url.endswith("/route/v1/driving/-74.006,40.7128;-87.6298,41.8781")
-    assert params == {"overview": "full", "geometries": "geojson", "steps": "false"}
+    assert params == {
+        "overview": "full",
+        "geometries": "geojson",
+        "steps": "false",
+        # Alternatives come back in this same response, so costing several roads
+        # against fuel prices still spends only one request.
+        "alternatives": "true",
+    }
 
 
 def test_osrm_makes_exactly_one_http_call_per_route():

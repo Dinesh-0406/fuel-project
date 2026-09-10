@@ -1,0 +1,14 @@
+$kind: http-request
+name: NY>LA
+description: |-
+  Generated from cURL: curl -X POST http://127.0.0.1:8000/api/v1/routes/ \
+    -H "Content-Type: application/json" \
+    -d '{"start": "New York, NY", "finish": "Los Angeles, CA"}'
+url: http://127.0.0.1:8000/api/v1/routes/
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: '{"start": "New York, NY", "finish": "Los Angeles, CA"}'
+order: 1789041243916
